@@ -16,6 +16,7 @@
 
     <nav class="page-tabs" aria-label="页面栏目">
       <button type="button" class="page-tab active" data-page="assessment">软件评估</button>
+      <button type="button" class="page-tab" data-page="quickstart">快速上手</button>
       <button type="button" class="page-tab" data-page="capabilities">评估能力说明</button>
       <button type="button" class="page-tab" data-page="environment">环境与配置</button>
     </nav>
@@ -84,6 +85,55 @@
     <section id="error" class="error hidden"></section>
     <section id="report" class="hidden"></section>
     </div>
+
+    <section id="quickstart-page" class="hidden">
+      <div class="capability-intro card">
+        <h2>快速上手</h2>
+        <p>基础静态评估只需要 macOS 和 Python 3.11+。VirusTotal、ClamAV 和 Tart 都是可选增强能力，可以稍后再配置。</p>
+      </div>
+      <div class="guide-list">
+        <section class="guide-card card">
+          <span class="guide-step">1</span>
+          <div>
+            <h3>初始化并启动</h3>
+            <p>在项目目录执行以下命令。项目当前没有第三方 Python 运行时依赖，但仍会创建独立虚拟环境。</p>
+            <pre><code>./scripts/setup.sh
+./scripts/run.sh</code></pre>
+            <p>然后打开 <code>http://127.0.0.1:8765</code>。</p>
+          </div>
+        </section>
+        <section class="guide-card card">
+          <span class="guide-step">2</span>
+          <div>
+            <h3>配置 VirusTotal（可选）</h3>
+            <p>注册或登录 VirusTotal，在账户的 API Key 页面取得密钥，然后到“环境与配置”中保存。CanUInstall 只查询 SHA-256 的已有报告，不上传文件。</p>
+            <p><a href="https://www.virustotal.com/gui/my-apikey" target="_blank" rel="noreferrer">打开 VirusTotal API Key 页面</a> · <a href="https://docs.virustotal.com/docs/api-overview" target="_blank" rel="noreferrer">查看 API 文档与使用限制</a></p>
+          </div>
+        </section>
+        <section class="guide-card card">
+          <span class="guide-step">3</span>
+          <div>
+            <h3>启用 Tart 动态分析（可选）</h3>
+            <p>需要 Apple Silicon Mac、Homebrew 和较多磁盘空间。下面的命令会安装 Tart、下载 macOS 基础镜像，并在专用镜像中安装 osquery。</p>
+            <pre><code>./scripts/setup.sh --with-dynamic</code></pre>
+            <p>镜像下载可能达到数十 GB。完成后，“环境与配置”应显示 <code>canuinstall-runtime</code>、osquery 和 eslogger 可用。</p>
+            <p><a href="https://tart.run/quick-start/" target="_blank" rel="noreferrer">查看 Tart 官方快速入门</a></p>
+          </div>
+        </section>
+        <section class="guide-card card">
+          <span class="guide-step">4</span>
+          <div>
+            <h3>启用本地杀毒扫描（可选）</h3>
+            <p>安装 ClamAV 后会自动增加本地已知恶意内容扫描。未安装不会阻止其他评估。</p>
+            <pre><code>./scripts/setup.sh --with-clamav</code></pre>
+          </div>
+        </section>
+      </div>
+      <aside class="guide-note card">
+        <strong>关于 requirements.txt</strong>
+        <p>当前后端只使用 Python 标准库，因此文件里没有需要下载的包。保留该文件是为了让安装命令、编辑器和自动化流程都有明确入口；未来增加依赖时也能保持兼容。</p>
+      </aside>
+    </section>
 
     <section id="capabilities-page" class="hidden">
       <div class="capability-intro card">

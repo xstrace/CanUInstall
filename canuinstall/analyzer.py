@@ -1102,15 +1102,23 @@ def inspect_tart_dynamic(
         f"应用进程：{observation.executable or '未识别'}",
         f"Bundle ID：{observation.bundle_id or '未识别'}",
     ]
-    if observation.new_processes:
-        evidence_parts.append("新增进程：\n" + "\n".join(observation.new_processes))
-    if observation.network_connections:
+    if observation.collectors:
+        evidence_parts.append("事件采集器：\n" + "\n".join(observation.collectors))
+    if observation.process_events:
+        evidence_parts.append("进程事件与父子关系：\n" + "\n".join(observation.process_events))
+    elif observation.new_processes:
+        evidence_parts.append("进程快照（回退）：\n" + "\n".join(observation.new_processes))
+    if observation.network_events:
+        evidence_parts.append("持续网络事件：\n" + "\n".join(observation.network_events))
+    elif observation.network_connections:
         evidence_parts.append(
-            "运行时网络连接：\n" + "\n".join(observation.network_connections)
+            "网络连接快照（回退）：\n" + "\n".join(observation.network_connections)
         )
-    if observation.recent_files:
+    if observation.file_events:
+        evidence_parts.append("文件操作事件：\n" + "\n".join(observation.file_events))
+    elif observation.recent_files:
         evidence_parts.append(
-            "近期文件变化：\n" + "\n".join(observation.recent_files)
+            "近期文件变化（回退）：\n" + "\n".join(observation.recent_files)
         )
     if observation.logs:
         evidence_parts.append("相关统一日志：\n" + "\n".join(observation.logs))
@@ -1131,19 +1139,20 @@ def inspect_tart_dynamic(
         "已在 Tart 一次性 macOS VM 中完成限时启动与系统行为观察。",
         evidence,
     )
-    if observation.network_connections:
+    network_records = observation.network_events or observation.network_connections
+    if network_records:
         ctx.control(
             "network_behavior",
             "observe",
-            f"观察到 {len(observation.network_connections)} 条应用网络连接记录。",
-            "\n".join(observation.network_connections),
+            f"观察到 {len(network_records)} 条应用网络事件或连接记录。",
+            "\n".join(network_records),
         )
         ctx.add(
             "动态行为",
             "info",
             "Tart 观察到运行时网络活动",
             "网络活动本身不等于风险，应结合目标地址和软件用途判断。",
-            "\n".join(observation.network_connections),
+            "\n".join(network_records),
             control_id="network_behavior",
         )
     else:

@@ -1,0 +1,3 @@
+# CanUInstall currently uses only the Python standard library.
+# Keep this file so `pip install -r requirements.txt` remains a valid,
+# explicit setup step for users and automation.

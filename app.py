@@ -50,22 +50,13 @@ TOOL_GROUPS = [
         ],
     },
     {
-        "id": "dynamic",
-        "title": "轻量动态观察工具",
-        "items": [
-            ("fs_usage", ["/usr/bin/fs_usage"], "观察运行时文件访问；缺失不影响静态评估"),
-            ("nettop/lsof", ["/usr/bin/nettop", "/usr/sbin/lsof", "lsof"], "观察网络连接；任一存在即可"),
-            ("log", ["/usr/bin/log"], "读取 macOS 统一日志"),
-            ("ps", ["/bin/ps", "/usr/bin/ps"], "记录进程和子进程快照"),
-            ("sandbox-exec", ["/usr/bin/sandbox-exec"], "实验性进程约束；已被 Apple 标记为弃用"),
-        ],
-    },
-    {
         "id": "tart",
         "title": "Tart 隔离动态分析",
         "items": [
             ("tart", ["/opt/homebrew/bin/tart", "tart"], "创建一次性 macOS VM 并执行隔离动态观察"),
-            ("tart-base-vm", [], "可克隆的 Tart 基础 VM；默认名称为 tahoe-base"),
+            ("tart-base-vm", [], "可克隆的 Tart 基础 VM；优先使用 canuinstall-runtime"),
+            ("osquery", [], "在 Tart VM 内查询进程状态、签名及可用事件表"),
+            ("eslogger", [], "在 Tart VM 内逐条记录 exec、fork 和 exit 进程事件"),
         ],
     },
 ]
@@ -105,6 +96,13 @@ def environment_status() -> dict[str, object]:
         for tool_id, candidates, effect in group["items"]:
             if tool_id == "tart-base-vm":
                 path = str(tart["baseVm"]) if tart["baseVmAvailable"] else None
+            elif tool_id in {"osquery", "eslogger"}:
+                guest_path = (
+                    "/usr/local/bin/osqueryi"
+                    if tool_id == "osquery"
+                    else "/usr/bin/eslogger"
+                )
+                path = f"Tart VM: {guest_path}" if tart["osqueryExpected"] else None
             else:
                 path = resolve_tool(candidates)
             items.append(
@@ -189,7 +187,10 @@ class Handler(BaseHTTPRequestHandler):
                                     "id": control_id,
                                     "title": title,
                                     "method": CONTROL_METHODS.get(control_id, ""),
-                                    "action": CONTROL_ACTIONS.get(control_id, ""),
+                                    "action": CONTROL_ACTIONS.get(
+                                        control_id,
+                                        "不适用（当前结论不需要额外处理）。",
+                                    ),
                                 }
                                 for control_id, title in group["items"]
                             ],
@@ -399,7 +400,7 @@ def run_analysis_job(
             workdir=workdir,
             vt_api_key=os.getenv("VIRUSTOTAL_API_KEY"),
             dynamic_enabled=dynamic_enabled,
-            tart_base_vm=os.getenv("TART_BASE_VM", "tahoe-base"),
+            tart_base_vm=os.getenv("TART_BASE_VM"),
         )
         job.log(f"任务完成，总耗时 {time.time() - started:.1f}s。", "success", "system")
         with job.lock:

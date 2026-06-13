@@ -22,7 +22,7 @@ from canuinstall.analyzer import (
 from canuinstall.commands import CommandResult, run
 from canuinstall.models import AnalysisContext
 from canuinstall.progress import Job, reset_reporter, set_reporter
-from canuinstall.tart_dynamic import _parse_sections
+from canuinstall.tart_dynamic import _osquery_process_events, _parse_sections
 
 
 class AnalyzerTests(unittest.TestCase):
@@ -285,9 +285,10 @@ warning: trailing diagnostic
         }
         self.assertIn("codesign", tool_ids)
         self.assertIn("clamscan", tool_ids)
-        self.assertIn("sandbox-exec", tool_ids)
         self.assertIn("tart", tool_ids)
         self.assertIn("tart-base-vm", tool_ids)
+        self.assertIn("osquery", tool_ids)
+        self.assertIn("eslogger", tool_ids)
 
     def test_tart_output_sections_are_parsed(self):
         sections = _parse_sections(
@@ -299,6 +300,18 @@ Example 1 admin 10u IPv4 TCP 10.0.0.2:5000->1.1.1.1:443
         )
         self.assertEqual(sections["LAUNCH_STATUS"], "launched")
         self.assertIn("1.1.1.1:443", sections["NETWORK"])
+
+    def test_osquery_process_events_keep_target_process_tree(self):
+        events = "\n".join(
+            [
+                '{"name":"es_process_events","columns":{"pid":"10","parent":"1","path":"/tmp/Test.app/Contents/MacOS/Test","cmdline":"Test","time":"1","event_type":"exec"}}',
+                '{"name":"es_process_events","columns":{"pid":"11","parent":"10","path":"/bin/sh","cmdline":"sh -c echo","time":"2","event_type":"exec"}}',
+                '{"name":"es_process_events","columns":{"pid":"99","parent":"1","path":"/usr/bin/other","cmdline":"other","time":"3","event_type":"exec"}}',
+            ]
+        )
+        result = _osquery_process_events(events, "Test")
+        self.assertEqual(len(result), 2)
+        self.assertTrue(any("pid=11 ppid=10" in item for item in result))
 
     def test_virustotal_missing_hash_adds_small_uncertainty(self):
         context = AnalysisContext()

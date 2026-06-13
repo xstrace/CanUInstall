@@ -69,8 +69,13 @@ ASSESSMENT_CATALOG = [
 ]
 
 CONTROL_ACTIONS = {
+    "virustotal": "出现恶意或可疑引擎命中时拒绝或专项复核；无命中且样本历史成熟时无需额外处理；未查询时标记为不适用。",
+    "local_av": "本地引擎命中时拒绝或复核；未命中时无需额外处理；未安装扫描引擎时标记为不适用。",
+    "binary_hardening": "缺少必要架构、Hardened Runtime 或出现异常 Mach-O 时复核；检查正常时无需额外处理。",
     "signature": "核对签名中的发布者名称和 Team ID 是否与官网一致；一致且签名校验通过即可放行此项。",
+    "publisher_identity": "将开发者名称和 Team ID 与厂商官网或正式发布说明核对；一致时无需额外处理。",
     "gatekeeper": "在测试机执行 Gatekeeper 评估，并确认结果为 accepted；若只因挂载位置无法判断，可复制到本地临时目录后重试。",
+    "source_reputation": "仅上传文件且无法确认来源时，核对厂商官网公布的下载渠道和哈希；来源已确认时无需额外处理。",
     "product_reputation": "确认厂商仍提供安全更新、下载页可访问且当前版本受支持；不要求以知名度作为放行条件。",
     "privacy": "对照软件实际业务用途核对权限。只批准功能必需的摄像头、麦克风、屏幕或通讯录权限，并在首次运行时拒绝无关权限。",
     "file_access": "确认访问范围是否由用户主动选择，以及是否需要写入。广泛目录写入或沙箱绝对路径例外应由安全人员核对。",
@@ -88,8 +93,8 @@ CONTROL_ACTIONS = {
     "dependency_manifests": "依赖清单用于后续 SBOM/CVE 自动匹配，不要求人工逐项阅读。",
     "vulnerabilities": "接入版本识别和 CVE 数据后自动判断；当前未执行时，不应让审批人员手工搜索全部依赖。",
     "update_framework": "核对更新包是否使用 HTTPS、是否验证签名、更新域名是否属于厂商；满足三项即可通过。",
-    "dynamic_analysis": "仅对静态初筛未发现高风险的软件，在无真实数据、无管理员权限的专用测试账户中限时运行 60–120 秒。高风险或未知来源软件应改用 macOS 虚拟机。",
-    "network_behavior": "受控运行时记录进程、文件写入、DNS/连接目标和系统日志；只对未知域名、敏感目录访问或异常子进程进行人工判断。",
+    "dynamic_analysis": "在一次性 macOS 虚拟机的无真实数据专用测试账户中运行；系统自动还原进程树并筛选异常子进程，只有出现脚本解释器、提权、持久化或跨应用控制等行为时才需要人工复核。",
+    "network_behavior": "系统自动列出事件级连接和文件操作；只对未知外部地址、敏感目录访问或与产品用途不符的活动进行人工判断。",
 }
 
 CONTROL_METHODS = {
@@ -117,8 +122,8 @@ CONTROL_METHODS = {
     "dependency_manifests": "查找 package-lock、Cargo.lock、requirements.txt 等依赖与锁文件，供后续 SBOM 使用。",
     "vulnerabilities": "当前仅预留控制项；可靠判断需要组件名称、精确版本与 CVE 数据源匹配，因此暂不自动下结论。",
     "update_framework": "识别 Sparkle、Squirrel、ShipIt、Google Update 等自动更新框架，后续核对签名和更新域名。",
-    "dynamic_analysis": "启用 Tart 时，从指定基础镜像创建一次性 macOS VM，通过只读共享目录传入样本，限时启动后采集进程、文件变化和统一日志，结束后销毁克隆。",
-    "network_behavior": "在 Tart VM 内按待测进程采集 lsof 网络连接。默认使用主机隔离网络，记录连接尝试和已建立连接，但不允许未知软件直接访问互联网。",
+    "dynamic_analysis": "从专用 Tart 镜像创建一次性 macOS VM。VM 内使用 osquery 查询进程状态与事件表，并由 macOS eslogger 持续记录 exec/fork/exit 以还原进程树，同时采集统一日志，结束后销毁克隆。",
+    "network_behavior": "VM 内读取 osquery 可用的 socket 与文件事件，并以持续运行的 nettop、fs_usage 记录网络流量和文件操作。默认使用主机隔离网络，不允许未知软件直接访问互联网。",
 }
 
 
@@ -263,7 +268,10 @@ class AnalysisContext:
                         "title": title,
                         **result,
                         "action": result.get("action")
-                        or CONTROL_ACTIONS.get(control_id, ""),
+                        or CONTROL_ACTIONS.get(
+                            control_id,
+                            "不适用（当前结论不需要额外处理）。",
+                        ),
                         "requiresHumanReview": result["status"] in {"review", "risk"},
                         "relatedFindings": related,
                     }

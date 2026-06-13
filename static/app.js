@@ -47,6 +47,7 @@ document.querySelectorAll(".page-tab").forEach(tab => tab.addEventListener("clic
   tab.classList.add("active");
   const page = tab.dataset.page;
   document.querySelector("#assessment-page").classList.toggle("hidden", page !== "assessment");
+  document.querySelector("#quickstart-page").classList.toggle("hidden", page !== "quickstart");
   document.querySelector("#capabilities-page").classList.toggle("hidden", page !== "capabilities");
   document.querySelector("#environment-page").classList.toggle("hidden", page !== "environment");
   if (page === "capabilities") loadCapabilities();
