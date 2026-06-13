@@ -93,7 +93,7 @@ CONTROL_ACTIONS = {
 }
 
 CONTROL_METHODS = {
-    "virustotal": "计算文件 SHA-256，通过 VirusTotal API 查询已有多引擎报告。只查询哈希，不上传文件；无记录时返回证据不足。",
+    "virustotal": "计算文件 SHA-256，通过 VirusTotal API 查询已有多引擎报告、首次/最近提交时间、扫描时间、提交次数和社区信誉。只查询哈希，不上传文件；无记录或历史很短时作为轻微不确定性信号。",
     "local_av": "如果本机可找到 clamscan，则递归扫描安装包或展开内容；未安装 ClamAV 时明确标记为未执行。",
     "binary_hardening": "识别 Mach-O 文件与 arm64/x86_64 架构，并通过 codesign 信息抽样检查 Hardened Runtime。",
     "signature": "使用 codesign --verify 或 pkgutil --check-signature 验证签名完整性和 PKG 信任链。",

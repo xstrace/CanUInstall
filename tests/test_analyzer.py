@@ -1,16 +1,20 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from datetime import UTC, datetime, timedelta
 import unittest
+from unittest import mock
 
 import plistlib
 
 from app import environment_status, save_local_api_key
 from canuinstall.analyzer import (
+    assess_virustotal_history,
     analyze_path,
     hash_path,
     inspect_data_security,
     inspect_dynamic_readiness,
     inspect_entitlements,
+    inspect_virustotal,
     inspect_source_reputation,
     inspect_scripts,
     inspect_supply_chain,
@@ -295,6 +299,72 @@ Example 1 admin 10u IPv4 TCP 10.0.0.2:5000->1.1.1.1:443
         )
         self.assertEqual(sections["LAUNCH_STATUS"], "launched")
         self.assertIn("1.1.1.1:443", sections["NETWORK"])
+
+    def test_virustotal_missing_hash_adds_small_uncertainty(self):
+        context = AnalysisContext()
+        with mock.patch(
+            "canuinstall.analyzer.virustotal.lookup",
+            return_value={"status": 404, "payload": {}},
+        ):
+            inspect_virustotal("a" * 64, "key", context)
+        self.assertEqual(context.controls["virustotal"]["status"], "observe")
+        finding = next(
+            item for item in context.findings if item.control_id == "virustotal"
+        )
+        self.assertEqual(finding.score(), 2)
+        self.assertEqual(context.metadata["virusTotal"]["historyMaturity"], "unseen")
+
+    def test_virustotal_new_clean_hash_adds_small_uncertainty(self):
+        now = datetime(2026, 6, 13, tzinfo=UTC)
+        first = int((now - timedelta(days=10)).timestamp())
+        payload = {
+            "data": {
+                "attributes": {
+                    "first_submission_date": first,
+                    "last_submission_date": first,
+                    "last_analysis_date": first,
+                    "times_submitted": 1,
+                    "last_analysis_stats": {
+                        "malicious": 0,
+                        "suspicious": 0,
+                        "harmless": 0,
+                        "undetected": 70,
+                    },
+                }
+            }
+        }
+        context = AnalysisContext()
+        with mock.patch(
+            "canuinstall.analyzer.virustotal.lookup",
+            return_value={"status": 200, "payload": payload},
+        ):
+            inspect_virustotal("a" * 64, "key", context, now=now)
+        finding = next(
+            item
+            for item in context.findings
+            if item.title == "VirusTotal 样本历史很短"
+        )
+        self.assertEqual(finding.score(), 3)
+        self.assertEqual(context.controls["virustotal"]["status"], "observe")
+
+    def test_virustotal_old_clean_hash_is_positive_evidence(self):
+        now = datetime(2026, 6, 13, tzinfo=UTC)
+        history = assess_virustotal_history(
+            {
+                "first_submission_date": int(
+                    (now - timedelta(days=5 * 365)).timestamp()
+                ),
+                "last_submission_date": int((now - timedelta(days=20)).timestamp()),
+                "last_analysis_date": int((now - timedelta(days=2)).timestamp()),
+                "times_submitted": 12,
+                "unique_sources": 7,
+                "reputation": 4,
+                "total_votes": {"harmless": 3, "malicious": 0},
+            },
+            now=now,
+        )
+        self.assertEqual(history["historyMaturity"], "mature")
+        self.assertGreaterEqual(history["ageDays"], 5 * 365)
 
 
 if __name__ == "__main__":

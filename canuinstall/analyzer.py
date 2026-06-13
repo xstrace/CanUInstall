@@ -1507,6 +1507,8 @@ def inspect_virustotal(
     sha256: str,
     api_key: str | None,
     ctx: AnalysisContext,
+    *,
+    now: datetime | None = None,
 ) -> None:
     if not api_key:
         ctx.control("virustotal", "not_run", "未配置 VirusTotal API Key。")
@@ -1516,8 +1518,21 @@ def inspect_virustotal(
     if lookup["status"] == 404:
         ctx.control(
             "virustotal",
-            "unknown",
-            "VirusTotal 没有该 SHA-256 的公开记录；本工具不会上传文件。",
+            "observe",
+            "VirusTotal 没有该 SHA-256 的公开记录，公开样本历史不足。",
+        )
+        ctx.metadata["virusTotal"] = {
+            "found": False,
+            "historyMaturity": "unseen",
+        }
+        ctx.add(
+            "VirusTotal",
+            "low",
+            "VirusTotal 无公开样本记录",
+            "这可能是新版本、小众软件或私有发行包，并不表示恶意；但缺少公开检测历史会降低结论置信度。",
+            "仅按 SHA-256 查询，未上传文件。",
+            2,
+            "virustotal",
         )
         return
     if lookup["status"] not in {200, 201}:
@@ -1531,24 +1546,144 @@ def inspect_virustotal(
     suspicious = int(stats.get("suspicious", 0))
     harmless = int(stats.get("harmless", 0))
     undetected = int(stats.get("undetected", 0))
+    history = assess_virustotal_history(attrs, now=now)
     ctx.metadata["virusTotal"] = {
+        "found": True,
         "malicious": malicious,
         "suspicious": suspicious,
         "harmless": harmless,
         "undetected": undetected,
+        **history,
     }
+    evidence = virustotal_evidence(stats, history)
     if malicious >= 5:
-        ctx.control("virustotal", "risk", f"{malicious} 个引擎判定恶意。", json.dumps(stats))
-        ctx.add("VirusTotal", "critical", f"{malicious} 个引擎判定恶意", "多引擎一致命中，建议直接拒绝。", json.dumps(stats), 40, "virustotal")
+        ctx.control("virustotal", "risk", f"{malicious} 个引擎判定恶意。", evidence)
+        ctx.add("VirusTotal", "critical", f"{malicious} 个引擎判定恶意", "多引擎一致命中，建议直接拒绝。", evidence, 40, "virustotal")
     elif malicious >= 2:
-        ctx.control("virustotal", "risk", f"{malicious} 个引擎判定恶意。", json.dumps(stats))
-        ctx.add("VirusTotal", "high", f"{malicious} 个引擎判定恶意", "需要安全人员核实检测名称和引擎可靠性。", json.dumps(stats), 18, "virustotal")
+        ctx.control("virustotal", "risk", f"{malicious} 个引擎判定恶意。", evidence)
+        ctx.add("VirusTotal", "high", f"{malicious} 个引擎判定恶意", "需要安全人员核实检测名称和引擎可靠性。", evidence, 18, "virustotal")
     elif malicious == 1 or suspicious:
-        ctx.control("virustotal", "review", "存在少量恶意或可疑命中。", json.dumps(stats))
-        ctx.add("VirusTotal", "medium", "VirusTotal 存在少量命中", "可能是误报，也可能是新威胁，不能自动放行。", json.dumps(stats), 8, "virustotal")
+        ctx.control("virustotal", "review", "存在少量恶意或可疑命中。", evidence)
+        ctx.add("VirusTotal", "medium", "VirusTotal 存在少量命中", "可能是误报，也可能是新威胁，不能自动放行。", evidence, 8, "virustotal")
     else:
-        ctx.control("virustotal", "pass", "多引擎未报告已知恶意。", json.dumps(stats))
-        ctx.add("VirusTotal", "info", "VirusTotal 未发现恶意命中", "多引擎未报告已知恶意，但这不是安全保证。", json.dumps(stats), control_id="virustotal")
+        age_days = int(history["ageDays"])
+        if age_days < 30:
+            ctx.control(
+                "virustotal",
+                "observe",
+                f"多引擎当前无恶意命中，但该哈希仅有 {age_days} 天公开历史。",
+                evidence,
+            )
+            ctx.add(
+                "VirusTotal",
+                "low",
+                "VirusTotal 样本历史很短",
+                "当前未命中恶意，但样本首次出现不足 30 天，尚未形成充分的公开检测历史。",
+                evidence,
+                3,
+                "virustotal",
+            )
+        elif age_days < 180:
+            ctx.control(
+                "virustotal",
+                "observe",
+                f"多引擎当前无恶意命中；该哈希公开历史约 {age_days} 天。",
+                evidence,
+            )
+            ctx.add(
+                "VirusTotal",
+                "low",
+                "VirusTotal 样本历史较短",
+                "当前未命中恶意，但公开历史不足半年，作为轻微不确定性信号。",
+                evidence,
+                1,
+                "virustotal",
+            )
+        elif age_days >= 730:
+            ctx.control(
+                "virustotal",
+                "pass",
+                f"该哈希已有约 {age_days // 365} 年公开历史，最新多引擎扫描仍无恶意或可疑命中。",
+                evidence,
+            )
+            ctx.add(
+                "VirusTotal",
+                "info",
+                "VirusTotal 样本历史成熟",
+                "较长公开历史且最新扫描无恶意或可疑命中，是降低疑虑的正向证据，但不能抵消其他高风险发现。",
+                evidence,
+                control_id="virustotal",
+            )
+        else:
+            ctx.control("virustotal", "pass", "多引擎当前未报告已知恶意。", evidence)
+            ctx.add(
+                "VirusTotal",
+                "info",
+                "VirusTotal 未发现恶意命中",
+                "样本已有一定公开历史，最新多引擎扫描无恶意或可疑命中，但这不是安全保证。",
+                evidence,
+                control_id="virustotal",
+            )
+
+
+def assess_virustotal_history(
+    attrs: dict[str, object],
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    current = now or datetime.now(UTC)
+    first_timestamp = int(attrs.get("first_submission_date") or 0)
+    last_submission_timestamp = int(attrs.get("last_submission_date") or 0)
+    last_analysis_timestamp = int(attrs.get("last_analysis_date") or 0)
+    first = datetime.fromtimestamp(first_timestamp, UTC) if first_timestamp else current
+    age_days = max(0, (current - first).days)
+    maturity = (
+        "very_new"
+        if age_days < 30
+        else "new"
+        if age_days < 180
+        else "mature"
+        if age_days >= 730
+        else "established"
+    )
+    votes = attrs.get("total_votes") if isinstance(attrs.get("total_votes"), dict) else {}
+    return {
+        "historyMaturity": maturity,
+        "ageDays": age_days,
+        "firstSubmissionDate": timestamp_iso(first_timestamp),
+        "lastSubmissionDate": timestamp_iso(last_submission_timestamp),
+        "lastAnalysisDate": timestamp_iso(last_analysis_timestamp),
+        "timesSubmitted": int(attrs.get("times_submitted") or 0),
+        "uniqueSources": int(attrs.get("unique_sources") or 0),
+        "communityReputation": int(attrs.get("reputation") or 0),
+        "communityVotes": {
+            "harmless": int(votes.get("harmless", 0)),
+            "malicious": int(votes.get("malicious", 0)),
+        },
+    }
+
+
+def timestamp_iso(value: int) -> str:
+    return datetime.fromtimestamp(value, UTC).isoformat() if value else ""
+
+
+def virustotal_evidence(
+    stats: dict[str, object],
+    history: dict[str, object],
+) -> str:
+    votes = history["communityVotes"]
+    return "\n".join(
+        [
+            f"最新引擎统计：恶意 {int(stats.get('malicious', 0))}，可疑 {int(stats.get('suspicious', 0))}，"
+            f"无命中 {int(stats.get('undetected', 0))}，无害 {int(stats.get('harmless', 0))}",
+            f"首次提交：{history['firstSubmissionDate'] or '未知'}（约 {history['ageDays']} 天前）",
+            f"最近提交：{history['lastSubmissionDate'] or '未知'}",
+            f"最近扫描：{history['lastAnalysisDate'] or '未知'}",
+            f"提交次数：{history['timesSubmitted']}；独立来源：{history['uniqueSources']}",
+            f"社区信誉：{history['communityReputation']}；投票：无害 {votes['harmless']}，恶意 {votes['malicious']}",
+            "说明：时间历史与最新扫描结果是信誉信号，不能证明历史期间从未出现问题，也不能抵消其他高风险证据。",
+        ]
+    )
 
 
 def match_value(text: str, key: str) -> str | None:

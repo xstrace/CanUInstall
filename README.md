@@ -16,7 +16,7 @@ The first version supports:
 - Third-party Framework, dynamic library, bundled runtime, updater, and dependency
   manifest inventory
 - Source and publisher identity checks
-- Optional VirusTotal hash-only lookup; submitted files are never uploaded
+- Optional VirusTotal hash-only lookup with multi-engine results and sample-history maturity; submitted files are never uploaded
 - A 26-control assessment matrix across six dimensions that distinguishes pass,
   informational observations, manual review, risk, insufficient evidence, and not run
 - Actionable review instructions that state what to verify and what qualifies for approval
