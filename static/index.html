@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CanUInstall · macOS 软件准入评估</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">MACOS SOFTWARE ADMISSION</div>
+      <h1>这个软件，<span>能装吗？</span></h1>
+      <p class="intro">从恶意特征、发布者信誉、系统影响、数据访问与安全、第三方供应链和运行行为六个维度评估公开 macOS 软件。未执行的检查会明确标出。</p>
+    </header>
+
+    <nav class="page-tabs" aria-label="页面栏目">
+      <button type="button" class="page-tab active" data-page="assessment">软件评估</button>
+      <button type="button" class="page-tab" data-page="capabilities">评估能力说明</button>
+      <button type="button" class="page-tab" data-page="environment">环境与配置</button>
+    </nav>
+
+    <div id="assessment-page">
+    <section id="environment-notice" class="environment-notice card">
+      <strong>正在检查分析环境…</strong>
+      <p>缺失的增强工具不会阻止扫描，但可能降低覆盖率。</p>
+    </section>
+    <section class="card input-card">
+      <form id="analysis-form">
+        <label class="drop-zone" id="drop-zone">
+          <input id="file" name="file" type="file" accept=".app,.dmg,.pkg,.zip,application/zip">
+          <span class="drop-icon">↓</span>
+          <strong id="file-label">选择 DMG、PKG、ZIP</strong>
+          <small>.app 请先压缩为 ZIP 上传，最大 2 GB</small>
+        </label>
+        <div class="optional-field">
+          <label for="homepage">软件官网或产品主页 <span>可选，用于来源信誉判断</span></label>
+          <input id="homepage" name="homepage" type="url" placeholder="https://vendor.example.com/product">
+        </div>
+        <p class="status-line" id="vt-status">正在检查 VirusTotal 配置…</p>
+        <label class="dynamic-option" id="dynamic-option">
+          <input id="dynamic-enabled" type="checkbox" checked>
+          <span>
+            <strong>启用 Tart 隔离动态观察</strong>
+            <small id="dynamic-status">正在检查 Tart 环境…</small>
+          </span>
+        </label>
+        <button class="primary" type="submit" id="submit">开始评估</button>
+      </form>
+    </section>
+
+    <section class="progress card hidden" id="progress">
+      <div class="progress-top">
+        <div class="progress-state">
+          <div class="spinner" id="progress-spinner"></div>
+          <div>
+            <strong id="progress-title">正在上传文件</strong>
+            <p id="progress-detail">准备建立分析任务…</p>
+          </div>
+        </div>
+        <div class="progress-actions">
+          <label><input type="checkbox" id="auto-scroll" checked> 自动滚动</label>
+          <button type="button" id="copy-log">复制日志</button>
+        </div>
+      </div>
+      <div class="progress-track"><span id="progress-bar"></span></div>
+      <div class="stage-progress" aria-live="polite">
+        <div class="stage-summary">
+          <strong id="stage-summary-title">0/0 项已完成</strong>
+          <span id="stage-summary-detail">正在准备评估阶段…</span>
+        </div>
+        <ol class="stage-list" id="stage-list"></ol>
+      </div>
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span></span><span></span><span></span>
+          <strong>assessment.log</strong>
+          <small id="elapsed-time">00:00</small>
+        </div>
+        <div class="terminal-output" id="terminal-output" role="log" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section id="error" class="error hidden"></section>
+    <section id="report" class="hidden"></section>
+    </div>
+
+    <section id="capabilities-page" class="hidden">
+      <div class="capability-intro card">
+        <h2>评估能力说明</h2>
+        <p>这里列出当前版本实际执行的检查、使用的证据和需要人工介入的边界。静态线索表示软件具备相关能力，不等于运行时一定执行。</p>
+      </div>
+      <div id="capability-list" class="capability-list"></div>
+    </section>
+
+    <section id="environment-page" class="hidden">
+      <div class="capability-intro card">
+        <h2>环境与配置</h2>
+        <p>检查当前系统能否运行各项分析工具，并管理只保存在本机的服务密钥。缺失增强能力不会阻止基础静态评估。</p>
+      </div>
+      <section class="settings-panel config-card card">
+        <div class="panel-heading">
+          <div>
+            <h3>VirusTotal</h3>
+            <p id="config-vt-state">正在读取配置状态…</p>
+          </div>
+          <span class="health-status pending" id="config-vt-badge">检查中</span>
+        </div>
+        <form id="vt-config-form">
+          <label for="vt-api-key">API Key</label>
+          <div class="secret-row">
+            <input id="vt-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="输入新的 64 位 API Key">
+            <button type="submit" class="compact-action primary-action">保存配置</button>
+            <button type="button" class="compact-action quiet-action" id="clear-vt-key">清除</button>
+          </div>
+          <small>密钥写入项目目录下的 <code>.env.local</code>，权限为 600；页面和 API 均不会回显密钥。仅用于 SHA-256 查询，不上传文件。</small>
+          <p id="config-message" class="config-message" aria-live="polite"></p>
+        </form>
+      </section>
+      <div id="environment-tools" class="environment-tools"></div>
+    </section>
+
+    <footer>静态分析不能证明软件绝对安全。报告应与企业政策和实际使用场景共同判断。</footer>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,2 @@
+"""CanUInstall macOS analysis package."""
+
