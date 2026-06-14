@@ -60,7 +60,7 @@ ASSESSMENT_CATALOG = [
     },
     {
         "id": "behavior",
-        "title": "轻量动态验证",
+        "title": "隔离动态行为",
         "items": [
             ("dynamic_analysis", "受控运行与系统行为观察"),
             ("network_behavior", "运行时网络与文件活动"),
@@ -122,8 +122,8 @@ CONTROL_METHODS = {
     "dependency_manifests": "查找 package-lock、Cargo.lock、requirements.txt 等依赖与锁文件，供后续 SBOM 使用。",
     "vulnerabilities": "当前仅预留控制项；可靠判断需要组件名称、精确版本与 CVE 数据源匹配，因此暂不自动下结论。",
     "update_framework": "识别 Sparkle、Squirrel、ShipIt、Google Update 等自动更新框架，后续核对签名和更新域名。",
-    "dynamic_analysis": "从专用 Tart 镜像创建一次性 macOS VM。VM 内使用 osquery 查询进程状态与事件表，并由 macOS eslogger 持续记录 exec/fork/exit 以还原进程树，同时采集统一日志，结束后销毁克隆。",
-    "network_behavior": "VM 内读取 osquery 可用的 socket 与文件事件，并以持续运行的 nettop、fs_usage 记录网络流量和文件操作。默认使用主机隔离网络，不允许未知软件直接访问互联网。",
+    "dynamic_analysis": "从专用 Tart 镜像创建一次性 macOS VM。VM 内由 osquery 每秒记录进程状态，eslogger 补齐短生命周期的 exec/fork/exit 事件，最终按 PID/PPID 还原完整进程树。",
+    "network_behavior": "VM 内由 osquery 记录进程 socket，tcpdump 记录 TCP 建连、UDP 和 DNS，eslogger/fs_usage 记录文件创建、修改、重命名与删除。使用 Tart Softnet 允许公网访问并阻止私网目标。",
 }
 
 
@@ -300,7 +300,7 @@ class AnalysisContext:
                 else "本次未成功启动应用执行动态观察，也没有执行安装脚本。"
             ),
             "未观察到的行为仍可能在登录、授权、更新、用户交互或更长运行时间后出现。",
-            "主机隔离网络会阻止直接互联网访问，因此动态结果不能证明软件在联网环境下没有外传行为。",
+            "Tart Softnet 允许访问公网但默认阻止私网目标；未观察到的连接仍可能受缓存、延迟触发或更长运行时间影响。",
             "数据安全线索表示软件具备相关能力或包含相关组件，不等于已经采集、上传或泄露数据。",
             "低风险不等于软件绝对安全，最终决定仍应结合企业使用场景。",
         ]

@@ -66,7 +66,7 @@ tart run \
   --no-graphics \
   --no-audio \
   --no-clipboard \
-  --net-host \
+  --net-softnet \
   --dir="osquery:$PKG_DIR:ro" \
   "$RUNTIME_VM" &
 RUN_PID=$!

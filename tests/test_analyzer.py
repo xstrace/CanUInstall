@@ -12,7 +12,6 @@ from canuinstall.analyzer import (
     analyze_path,
     hash_path,
     inspect_data_security,
-    inspect_dynamic_readiness,
     inspect_entitlements,
     inspect_virustotal,
     inspect_source_reputation,
@@ -20,9 +19,10 @@ from canuinstall.analyzer import (
     inspect_supply_chain,
 )
 from canuinstall.commands import CommandResult, run
+from canuinstall.dynamic_behavior import build_behavior_summary
 from canuinstall.models import AnalysisContext
 from canuinstall.progress import Job, reset_reporter, set_reporter
-from canuinstall.tart_dynamic import _osquery_process_events, _parse_sections
+from canuinstall.tart_dynamic import _parse_sections
 
 
 class AnalyzerTests(unittest.TestCase):
@@ -223,21 +223,6 @@ warning: trailing diagnostic
                 context.controls["sensitive_data"]["evidence"],
             )
 
-    def test_dynamic_readiness_provides_safe_local_plan(self):
-        context = AnalysisContext()
-        inspect_dynamic_readiness(context)
-        report = context.to_report({"type": "file", "name": "Example.app"})
-        dynamic = next(
-            item
-            for group in report["assessment"]
-            for item in group["items"]
-            if item["id"] == "dynamic_analysis"
-        )
-        self.assertEqual(dynamic["status"], "not_run")
-        self.assertIn("专用测试账户", dynamic["action"])
-        self.assertIn("macOS 虚拟机", dynamic["action"])
-        self.assertIn("dynamicReadiness", report["metadata"])
-
     def test_uploaded_file_without_homepage_has_unknown_source_reputation(self):
         context = AnalysisContext()
         inspect_source_reputation({"type": "file", "name": "app.dmg"}, context)
@@ -289,6 +274,9 @@ warning: trailing diagnostic
         self.assertIn("tart-base-vm", tool_ids)
         self.assertIn("osquery", tool_ids)
         self.assertIn("eslogger", tool_ids)
+        self.assertIn("tcpdump", tool_ids)
+        self.assertIn("fs_usage", tool_ids)
+        self.assertIn("lsof", tool_ids)
 
     def test_tart_output_sections_are_parsed(self):
         sections = _parse_sections(
@@ -301,17 +289,108 @@ Example 1 admin 10u IPv4 TCP 10.0.0.2:5000->1.1.1.1:443
         self.assertEqual(sections["LAUNCH_STATUS"], "launched")
         self.assertIn("1.1.1.1:443", sections["NETWORK"])
 
-    def test_osquery_process_events_keep_target_process_tree(self):
-        events = "\n".join(
-            [
-                '{"name":"es_process_events","columns":{"pid":"10","parent":"1","path":"/tmp/Test.app/Contents/MacOS/Test","cmdline":"Test","time":"1","event_type":"exec"}}',
-                '{"name":"es_process_events","columns":{"pid":"11","parent":"10","path":"/bin/sh","cmdline":"sh -c echo","time":"2","event_type":"exec"}}',
-                '{"name":"es_process_events","columns":{"pid":"99","parent":"1","path":"/usr/bin/other","cmdline":"other","time":"3","event_type":"exec"}}',
-            ]
+    def test_dynamic_behavior_builds_tree_and_deduplicates_activity(self):
+        sections = {
+            "LAUNCH_TIME": "100",
+            "OSQUERY_PROCESSES": """@100
+[
+  {"pid":"10","parent":"1","name":"Test","path":"/tmp/Test.app/Contents/MacOS/Test","cmdline":"Test https://api.example.com","start_time":"100"},
+  {"pid":"11","parent":"10","name":"helper","path":"/tmp/Test.app/Contents/MacOS/helper","cmdline":"helper --work","start_time":"101"},
+  {"pid":"99","parent":"1","name":"other","path":"/usr/bin/other","cmdline":"other","start_time":"90"}
+]
+@102
+[
+  {"pid":"10","parent":"1","name":"Test","path":"/tmp/Test.app/Contents/MacOS/Test","cmdline":"Test https://api.example.com","start_time":"100"},
+  {"pid":"11","parent":"10","name":"helper","path":"/tmp/Test.app/Contents/MacOS/helper","cmdline":"helper --work","start_time":"101"}
+]""",
+            "OSQUERY_SOCKETS": """@101
+[
+  {"pid":"10","path":"/tmp/Test.app/Contents/MacOS/Test","protocol":"6","local_address":"10.0.0.2","remote_address":"8.8.8.8","local_port":"51000","remote_port":"443","state":"ESTABLISHED"}
+]
+@102
+[
+  {"pid":"10","path":"/tmp/Test.app/Contents/MacOS/Test","protocol":"6","local_address":"10.0.0.2","remote_address":"8.8.8.8","local_port":"51000","remote_port":"443","state":"ESTABLISHED"}
+]""",
+            "ES_EVENTS": "\n".join(
+                [
+                    '{"time":101,"process":{"audit_token":{"pid":10},"parent_audit_token":{"pid":1},"executable":{"path":"/tmp/Test.app/Contents/MacOS/Test"}},"event":{"create":{"destination":{"path":"/Users/admin/Library/Application Support/Test/state.db"}}}}',
+                    '{"time":102,"process":{"audit_token":{"pid":10},"parent_audit_token":{"pid":1},"executable":{"path":"/tmp/Test.app/Contents/MacOS/Test"}},"event":{"create":{"destination":{"path":"/Users/admin/Library/Application Support/Test/state.db"}}}}',
+                ]
+            ),
+            "NETWORK_PACKETS": (
+                "101 IP 10.0.0.2.50000 > 8.8.8.8.53: 1234+ A? api.example.com. (33)\n"
+                "102 IP 8.8.8.8.53 > 10.0.0.2.50000: 1234 1/0/0 api.example.com. A 1.2.3.4 (49)"
+            ),
+        }
+        behavior = build_behavior_summary(
+            sections,
+            executable="Test",
+            bundle_id="com.example.test",
+            duration=20,
         )
-        result = _osquery_process_events(events, "Test")
-        self.assertEqual(len(result), 2)
-        self.assertTrue(any("pid=11 ppid=10" in item for item in result))
+        self.assertEqual(behavior["processCount"], 2)
+        self.assertIn("`-- helper [pid 11]", behavior["processTree"])
+        self.assertEqual(behavior["connectionCount"], 1)
+        self.assertEqual(behavior["connections"][0]["samples"], 2)
+        self.assertEqual(behavior["domainCount"], 1)
+        self.assertEqual(behavior["dnsQueries"][0]["domain"], "api.example.com")
+        self.assertEqual(behavior["fileActivityCount"], 1)
+        self.assertEqual(behavior["fileActivities"][0]["count"], 2)
+
+    def test_dynamic_behavior_attributes_dns_by_answer_address(self):
+        sections = {
+            "LAUNCH_TIME": "100",
+            "OSQUERY_PROCESSES": """@101
+[{"pid":"10","parent":"1","name":"Probe","path":"/Applications/Probe.app/Contents/MacOS/Probe","cmdline":"Probe","start_time":"101"}]""",
+            "OSQUERY_SOCKETS": """@102
+[{"pid":"10","protocol":"6","remote_address":"203.0.113.8","remote_port":"443","state":"ESTABLISHED"}]""",
+            "NETWORK_PACKETS": (
+                "10.0.0.2.50000 > 10.0.0.1.53: 1234+ A? updates.example.net. (37)\n"
+                "10.0.0.1.53 > 10.0.0.2.50000: 1234 1/0/0 "
+                "updates.example.net. 60 A 203.0.113.8 (53)"
+            ),
+        }
+        behavior = build_behavior_summary(
+            sections,
+            executable="Probe",
+            bundle_id="com.example.probe",
+            duration=10,
+        )
+        self.assertEqual(
+            ["updates.example.net"],
+            [item["domain"] for item in behavior["dnsQueries"]],
+        )
+        self.assertEqual(
+            ["updates.example.net"],
+            behavior["connections"][0]["domains"],
+        )
+
+    def test_lsof_socket_fallback_is_filtered_to_process_family(self):
+        sections = {
+            "LAUNCH_TIME": "100",
+            "OSQUERY_PROCESSES": """@100
+[{"pid":"10","parent":"1","name":"Test","path":"/tmp/Test.app/Contents/MacOS/Test","cmdline":"Test","start_time":"100"}]""",
+            "LSOF_SOCKETS": """@101
+p10
+cTest
+PTCP
+n10.0.0.2:51000->1.1.1.1:443
+TST=ESTABLISHED
+p99
+cother
+PTCP
+n10.0.0.2:52000->9.9.9.9:443
+TST=ESTABLISHED
+""",
+        }
+        behavior = build_behavior_summary(
+            sections,
+            executable="Test",
+            bundle_id="com.example.test",
+            duration=20,
+        )
+        self.assertEqual(behavior["connectionCount"], 1)
+        self.assertEqual(behavior["connections"][0]["remoteAddress"], "1.1.1.1")
 
     def test_virustotal_missing_hash_adds_small_uncertainty(self):
         context = AnalysisContext()

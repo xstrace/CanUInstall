@@ -287,6 +287,17 @@ def analyze_path(
                 ctx,
                 base_vm=tart_base_vm,
             )
+        else:
+            ctx.control(
+                "dynamic_analysis",
+                "not_run",
+                "本次未启用 Tart 动态分析。",
+            )
+            ctx.control(
+                "network_behavior",
+                "not_run",
+                "本次未启用运行时网络与文件行为观察。",
+            )
     finally:
         emit("清理挂载点和临时分析数据", "info", "phase")
         cleanup()
@@ -417,7 +428,6 @@ def inspect_roots(roots: list[Path], ctx: AnalysisContext) -> None:
     inspect_supply_chain(roots, ctx)
     emit("抽样分析 Mach-O 架构、加固与危险特征", "info", "step")
     inspect_static_binaries(roots, ctx)
-    inspect_dynamic_readiness(ctx)
     ctx.control(
         "vulnerabilities",
         "not_run",
@@ -1037,51 +1047,6 @@ def static_hint_evidence(values: set[str]) -> str:
     )
 
 
-def inspect_dynamic_readiness(ctx: AnalysisContext) -> None:
-    tools = {
-        "文件活动": shutil.which("fs_usage"),
-        "网络连接": shutil.which("nettop") or shutil.which("lsof"),
-        "统一日志": shutil.which("log"),
-        "进程快照": shutil.which("ps"),
-        "代码签名": shutil.which("codesign"),
-    }
-    available = [name for name, path in tools.items() if path]
-    missing = [name for name, path in tools.items() if not path]
-    plan = [
-        "仅允许静态初筛未出现高风险或阻断项的软件进入本机动态验证。",
-        "使用无真实业务数据、无管理员权限、未登录个人云账号的专用测试账户。",
-        "运行前后比较进程、文件写入和 LaunchAgent/LaunchDaemon 等持久化位置。",
-        "限时记录 fs_usage 文件活动、nettop/lsof 网络连接和 macOS 统一日志。",
-        "发现未知域名、敏感目录读取、异常子进程或提权请求时终止并升级人工复核。",
-        "高风险、未签名或来源不明的软件不得在办公主机运行，应改用 macOS 虚拟机。",
-    ]
-    evidence = (
-        f"本机可用观察能力：{'、'.join(available) or '无'}\n"
-        f"缺少：{'、'.join(missing) or '无'}\n\n"
-        "建议流程：\n- "
-        + "\n- ".join(plan)
-    )
-    ctx.metadata["dynamicReadiness"] = {
-        "availableTools": available,
-        "missingTools": missing,
-        "recommendedDurationSeconds": 120,
-        "hostExecutionEligibleOnlyAfterStaticScreening": True,
-        "plan": plan,
-    }
-    ctx.control(
-        "dynamic_analysis",
-        "not_run",
-        "尚未启动待测软件；已生成本机轻量动态验证方案。",
-        evidence,
-    )
-    ctx.control(
-        "network_behavior",
-        "not_run",
-        "尚未执行运行时网络与文件活动观察。",
-        evidence,
-    )
-
-
 def inspect_tart_dynamic(
     path: Path,
     workdir: Path,
@@ -1096,6 +1061,13 @@ def inspect_tart_dynamic(
         duration=int(os.getenv("TART_OBSERVATION_SECONDS", "20")),
     )
     ctx.metadata["dynamicObservation"] = observation.as_metadata()
+    behavior = observation.behavior
+    processes = behavior.get("processes", []) if isinstance(behavior, dict) else []
+    connections = behavior.get("connections", []) if isinstance(behavior, dict) else []
+    dns_queries = behavior.get("dnsQueries", []) if isinstance(behavior, dict) else []
+    file_activities = (
+        behavior.get("fileActivities", []) if isinstance(behavior, dict) else []
+    )
     evidence_parts = [
         observation.summary,
         f"一次性 VM：{observation.vm_name or '未创建'}",
@@ -1104,21 +1076,23 @@ def inspect_tart_dynamic(
     ]
     if observation.collectors:
         evidence_parts.append("事件采集器：\n" + "\n".join(observation.collectors))
-    if observation.process_events:
-        evidence_parts.append("进程事件与父子关系：\n" + "\n".join(observation.process_events))
-    elif observation.new_processes:
-        evidence_parts.append("进程快照（回退）：\n" + "\n".join(observation.new_processes))
-    if observation.network_events:
-        evidence_parts.append("持续网络事件：\n" + "\n".join(observation.network_events))
-    elif observation.network_connections:
+    process_tree = str(behavior.get("processTree", "")).strip()
+    if process_tree:
+        evidence_parts.append("进程树：\n" + process_tree)
+    if connections:
         evidence_parts.append(
-            "网络连接快照（回退）：\n" + "\n".join(observation.network_connections)
+            "去重后的远程连接：\n"
+            + "\n".join(_format_connection(item) for item in connections[:80])
         )
-    if observation.file_events:
-        evidence_parts.append("文件操作事件：\n" + "\n".join(observation.file_events))
-    elif observation.recent_files:
+    if dns_queries:
         evidence_parts.append(
-            "近期文件变化（回退）：\n" + "\n".join(observation.recent_files)
+            "DNS 查询：\n"
+            + "\n".join(_format_dns_query(item) for item in dns_queries[:80])
+        )
+    if file_activities:
+        evidence_parts.append(
+            "去重后的文件操作：\n"
+            + "\n".join(_format_file_activity(item) for item in file_activities[:100])
         )
     if observation.logs:
         evidence_parts.append("相关统一日志：\n" + "\n".join(observation.logs))
@@ -1136,32 +1110,75 @@ def inspect_tart_dynamic(
     ctx.control(
         "dynamic_analysis",
         "observe",
-        "已在 Tart 一次性 macOS VM 中完成限时启动与系统行为观察。",
+        f"已在 Tart 一次性 macOS VM 中观察到 {len(processes)} 个目标进程族进程。",
         evidence,
     )
-    network_records = observation.network_events or observation.network_connections
-    if network_records:
+    if connections or dns_queries or file_activities:
+        summary_parts = []
+        if connections:
+            summary_parts.append(f"{len(connections)} 条去重远程连接")
+        if dns_queries:
+            summary_parts.append(f"{len(dns_queries)} 个 DNS 域名")
+        if file_activities:
+            summary_parts.append(f"{len(file_activities)} 个去重文件操作")
         ctx.control(
             "network_behavior",
             "observe",
-            f"观察到 {len(network_records)} 条应用网络事件或连接记录。",
-            "\n".join(network_records),
-        )
-        ctx.add(
-            "动态行为",
-            "info",
-            "Tart 观察到运行时网络活动",
-            "网络活动本身不等于风险，应结合目标地址和软件用途判断。",
-            "\n".join(network_records),
-            control_id="network_behavior",
+            "观察到" + "、".join(summary_parts) + "。",
+            "\n\n".join(
+                part
+                for part in (
+                    "\n".join(_format_connection(item) for item in connections),
+                    "\n".join(_format_dns_query(item) for item in dns_queries),
+                    "\n".join(_format_file_activity(item) for item in file_activities),
+                )
+                if part
+            ),
         )
     else:
         ctx.control(
             "network_behavior",
             "pass",
-            "在主机隔离网络的限时观察中未记录到该应用的已建立连接。",
+            "在限时观察中未记录到目标应用的远程连接或文件变更。",
             evidence,
         )
+
+
+def _format_connection(item: object) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    states = ",".join(str(value) for value in item.get("states", [])) or "observed"
+    domains = ",".join(str(value) for value in item.get("domains", []))
+    target = f"{item.get('remoteAddress', '?')}:{item.get('remotePort', '?')}"
+    if domains:
+        target = f"{domains} -> {target}"
+    return (
+        f"{item.get('protocol', 'IP')} {target} "
+        f"[{item.get('process', '未知进程')} pid={item.get('pid', 0)}; "
+        f"{states}; {item.get('samples', 1)} 次]"
+    )
+
+
+def _format_dns_query(item: object) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    types = ",".join(str(value) for value in item.get("types", [])) or "DNS"
+    addresses = ",".join(str(value) for value in item.get("addresses", []))
+    return (
+        f"{item.get('domain', '?')} [{types}; {item.get('count', 1)} 次"
+        + (f"; {addresses}" if addresses else "")
+        + "]"
+    )
+
+
+def _format_file_activity(item: object) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    return (
+        f"{str(item.get('action', 'modify')).upper()} {item.get('path', '?')} "
+        f"[{item.get('process', '目标应用')} pid={item.get('pid', 0)}; "
+        f"{item.get('count', 1)} 次]"
+    )
 
 
 def inspect_source_reputation(source: dict[str, object], ctx: AnalysisContext) -> None:

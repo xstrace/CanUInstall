@@ -81,7 +81,7 @@ function renderAssessmentEnvironmentNotice() {
   dynamicEnabled.disabled = !tartReady;
   dynamicEnabled.checked = tartReady;
   dynamicStatus.textContent = tartReady
-    ? `已就绪：将从 ${environmentState.tart.baseVm} 创建一次性 VM，使用主机隔离网络。`
+    ? `已就绪：将从 ${environmentState.tart.baseVm} 创建一次性 VM，使用 Softnet 公网隔离。`
     : `不可用：需要 Tart CLI 和基础 VM ${environmentState.tart?.baseVm || "tahoe-base"}。`;
   const notice = document.querySelector("#environment-notice");
   notice.classList.toggle("warning", missing.length > 0);
@@ -461,6 +461,7 @@ function renderReport(data) {
     count: riskFindings.filter(item => item.severity === severity).length
   }));
   const basicInfo = buildBasicInfo(data);
+  const dynamicBehavior = renderDynamicBehavior(data);
   const riskOverview = riskFindings.length ? riskFindings.map(item => `
     <li class="risk-item">
       <span class="severity-mark ${escapeHtml(item.severity)}">${severityName(item.severity)}</span>
@@ -541,6 +542,7 @@ function renderReport(data) {
       </div>
       <ul class="risk-list">${riskOverview}</ul>
     </section>
+    ${dynamicBehavior}
     <div class="section-heading">
       <div>
         <h2 class="section-title">详细评估报告</h2>
@@ -563,6 +565,98 @@ function renderReport(data) {
   });
   report.classList.remove("hidden");
   report.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderDynamicBehavior(data) {
+  const observation = data?.metadata?.dynamicObservation;
+  const behavior = observation?.behavior;
+  if (!behavior || !["completed", "partial"].includes(observation.status)) return "";
+  const processes = behavior.processes || [];
+  const connections = behavior.connections || [];
+  const dnsQueries = behavior.dnsQueries || [];
+  const files = behavior.fileActivities || [];
+  const fileCounts = behavior.fileOperationCounts || {};
+  const connectionRows = connections.length ? connections.map(item => `
+    <div class="behavior-row">
+      <code>${escapeHtml(item.protocol || "IP")}</code>
+      <span class="behavior-primary">${item.domains?.length ? `${escapeHtml(item.domains.join(", "))} → ` : ""}${escapeHtml(item.remoteAddress)}:${escapeHtml(item.remotePort)}</span>
+      <span>${escapeHtml(item.process)}${item.pid ? ` · pid ${escapeHtml(item.pid)}` : ""}</span>
+      <span>${escapeHtml((item.states || []).join(", ") || "observed")} · ${escapeHtml(item.samples || 1)} 次</span>
+    </div>
+  `).join("") : `<p class="behavior-empty">未记录到目标进程族的远程连接。</p>`;
+  const dnsRows = dnsQueries.length ? dnsQueries.map(item => `
+    <div class="behavior-row dns-row">
+      <code>${escapeHtml((item.types || []).join("/") || "DNS")}</code>
+      <span class="behavior-primary">${escapeHtml(item.domain)}</span>
+      <span>${escapeHtml((item.addresses || []).join(", ") || "未在捕获窗口内取得地址")}</span>
+      <span>${escapeHtml(item.count || 1)} 次</span>
+    </div>
+  `).join("") : `<p class="behavior-empty">未记录到 DNS 查询。</p>`;
+  const fileRows = files.length ? files.map(item => `
+    <div class="behavior-row file-row">
+      <code>${fileActionName(item.action)}</code>
+      <span class="behavior-primary">${escapeHtml(item.path)}</span>
+      <span>${escapeHtml(item.process)}${item.pid ? ` · pid ${escapeHtml(item.pid)}` : ""}</span>
+      <span>${escapeHtml(item.count || 1)} 次</span>
+    </div>
+  `).join("") : `<p class="behavior-empty">未记录到目标进程族的文件变更。</p>`;
+  const fileSummary = ["create", "modify", "rename", "delete"]
+    .filter(action => fileCounts[action])
+    .map(action => `${fileActionName(action)} ${fileCounts[action]}`)
+    .join(" · ") || "无";
+  const warnings = behavior.warnings || [];
+  return `
+    <div class="section-heading behavior-section-heading">
+      <div>
+        <h2 class="section-title">动态行为观察</h2>
+        <p>Tart Softnet 隔离环境中的限时实测结果，已按进程和目标去重。</p>
+      </div>
+    </div>
+    <section class="card behavior-report">
+      <div class="behavior-summary">
+        <span>观察 <strong>${escapeHtml(behavior.durationSeconds || 0)} 秒</strong></span>
+        <span>进程 <strong>${escapeHtml(behavior.processCount || processes.length)}</strong></span>
+        <span>远程连接 <strong>${escapeHtml(behavior.connectionCount || connections.length)}</strong></span>
+        <span>DNS 域名 <strong>${escapeHtml(behavior.domainCount || dnsQueries.length)}</strong></span>
+        <span>文件操作 <strong>${escapeHtml(behavior.fileActivityCount || files.length)}</strong></span>
+      </div>
+      <section class="behavior-block">
+        <h3>进程树</h3>
+        <p>共观察到 ${escapeHtml(behavior.processCount || processes.length)} 个唯一进程。竖线表示父子关系。</p>
+        <pre class="behavior-tree">${escapeHtml(behavior.processTree || "未捕获到目标应用进程。")}</pre>
+      </section>
+      <section class="behavior-block">
+        <h3>网络连接</h3>
+        <p>${connections.length} 条去重连接；同一进程、协议、IP 和端口只列一次。</p>
+        <div class="behavior-list">${connectionRows}</div>
+      </section>
+      <section class="behavior-block">
+        <h3>DNS 查询</h3>
+        <p>${dnsQueries.length} 个去重域名。</p>
+        <div class="behavior-list">${dnsRows}</div>
+      </section>
+      <section class="behavior-block">
+        <h3>文件操作</h3>
+        <p>${fileSummary}；相同进程、动作和路径已合并计数。</p>
+        <div class="behavior-list">${fileRows}</div>
+      </section>
+      ${warnings.length ? `
+        <section class="behavior-block behavior-warnings">
+          <h3>采集提示</h3>
+          <ul>${warnings.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+        </section>
+      ` : ""}
+    </section>
+  `;
+}
+
+function fileActionName(action) {
+  return ({
+    create: "创建",
+    modify: "修改",
+    rename: "重命名",
+    delete: "删除"
+  })[action] || String(action || "操作").toUpperCase();
 }
 
 function buildBasicInfo(data) {
@@ -647,6 +741,7 @@ function buildMarkdownReport(data) {
   } else {
     lines.push("本次没有产生低级别以上的风险发现。", "");
   }
+  appendDynamicMarkdown(lines, data);
   lines.push("## 详细评估报告", "");
   data.assessment.forEach(group => {
     lines.push(`### ${group.title}`, "");
@@ -676,6 +771,45 @@ function buildMarkdownReport(data) {
     ""
   );
   return lines.join("\n");
+}
+
+function appendDynamicMarkdown(lines, data) {
+  const observation = data?.metadata?.dynamicObservation;
+  const behavior = observation?.behavior;
+  if (!behavior || !["completed", "partial"].includes(observation.status)) return;
+  lines.push(
+    "## 动态行为观察",
+    "",
+    `- 观察时长：${behavior.durationSeconds || 0} 秒`,
+    `- 唯一进程：${behavior.processCount || 0}`,
+    `- 去重远程连接：${behavior.connectionCount || 0}`,
+    `- DNS 域名：${behavior.domainCount || 0}`,
+    `- 去重文件操作：${behavior.fileActivityCount || 0}`,
+    "",
+    "### 进程树",
+    "",
+    "```text",
+    behavior.processTree || "未捕获到目标应用进程。",
+    "```",
+    "",
+    "### 网络连接",
+    ""
+  );
+  (behavior.connections || []).forEach(item => lines.push(
+    `- ${item.protocol || "IP"} ${item.domains?.length ? `${item.domains.join(", ")} → ` : ""}${item.remoteAddress}:${item.remotePort} · ${item.process}${item.pid ? ` pid ${item.pid}` : ""} · ${(item.states || []).join(", ") || "observed"} · ${item.samples || 1} 次`
+  ));
+  if (!(behavior.connections || []).length) lines.push("- 未记录到远程连接");
+  lines.push("", "### DNS 查询", "");
+  (behavior.dnsQueries || []).forEach(item => lines.push(
+    `- ${(item.types || []).join("/") || "DNS"} ${item.domain} · ${(item.addresses || []).join(", ") || "未取得地址"} · ${item.count || 1} 次`
+  ));
+  if (!(behavior.dnsQueries || []).length) lines.push("- 未记录到 DNS 查询");
+  lines.push("", "### 文件操作", "");
+  (behavior.fileActivities || []).forEach(item => lines.push(
+    `- ${fileActionName(item.action)} ${item.path} · ${item.process}${item.pid ? ` pid ${item.pid}` : ""} · ${item.count || 1} 次`
+  ));
+  if (!(behavior.fileActivities || []).length) lines.push("- 未记录到文件变更");
+  lines.push("");
 }
 
 function buildHtmlReport(data) {

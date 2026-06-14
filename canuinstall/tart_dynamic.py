@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import shlex
@@ -12,6 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .dynamic_behavior import build_behavior_summary
 from .progress import emit
 
 
@@ -30,12 +30,7 @@ class TartObservation:
     launched: bool = False
     executable: str = ""
     bundle_id: str = ""
-    new_processes: list[str] = field(default_factory=list)
-    process_events: list[str] = field(default_factory=list)
-    network_connections: list[str] = field(default_factory=list)
-    network_events: list[str] = field(default_factory=list)
-    recent_files: list[str] = field(default_factory=list)
-    file_events: list[str] = field(default_factory=list)
+    behavior: dict[str, object] = field(default_factory=dict)
     logs: list[str] = field(default_factory=list)
     collectors: list[str] = field(default_factory=list)
     raw_output: str = ""
@@ -48,12 +43,7 @@ class TartObservation:
             "launched": self.launched,
             "executable": self.executable,
             "bundleId": self.bundle_id,
-            "newProcesses": self.new_processes,
-            "processEvents": self.process_events,
-            "networkConnections": self.network_connections,
-            "networkEvents": self.network_events,
-            "recentFiles": self.recent_files,
-            "fileEvents": self.file_events,
+            "behavior": self.behavior,
             "logs": self.logs,
             "collectors": self.collectors,
         }
@@ -102,7 +92,7 @@ def tart_readiness(base_vm: str | None = None) -> dict[str, object]:
         "baseVmAvailable": selected in names,
         "localVms": names,
         "ready": bool(executable and selected in names),
-        "networkMode": "host-only",
+        "networkMode": "softnet",
         "osqueryExpected": selected == "canuinstall-runtime",
     }
 
@@ -129,8 +119,21 @@ def observe_with_tart(
     executable = str(readiness["tartPath"])
     selected_vm = str(readiness["baseVm"])
     vm_name = f"canuinstall-{uuid.uuid4().hex[:10]}"
+    shared_sample = sample
+    try:
+        sample.resolve().relative_to(workdir.resolve())
+    except ValueError:
+        shared_sample = workdir / sample.name
+        emit("将样本暂存到 Tart 只读共享目录。", "info", "step")
+        if sample.is_dir():
+            shutil.copytree(sample, shared_sample, dirs_exist_ok=True)
+        else:
+            shutil.copy2(sample, shared_sample)
     script = workdir / "tart-observe.sh"
-    script.write_text(_guest_script(sample.name, max(8, min(duration, 120))), encoding="utf-8")
+    script.write_text(
+        _guest_script(shared_sample.name, max(8, min(duration, 120))),
+        encoding="utf-8",
+    )
     script.chmod(0o755)
     run_process: subprocess.Popen[str] | None = None
 
@@ -154,7 +157,7 @@ def observe_with_tart(
                 "--no-graphics",
                 "--no-audio",
                 "--no-clipboard",
-                "--net-host",
+                "--net-softnet",
                 f"--dir={share}",
                 "--root-disk-opts=sync=none",
                 vm_name,
@@ -199,28 +202,20 @@ def observe_with_tart(
                 if launched and guest.returncode == 0
                 else "动态观察已运行，但应用未成功启动或观察脚本返回异常。"
             )
+            identified_executable = sections.get("EXECUTABLE", "").strip()
+            identified_bundle_id = sections.get("BUNDLE_ID", "").strip()
             return TartObservation(
                 "completed" if launched and guest.returncode == 0 else "partial",
                 summary,
                 vm_name=vm_name,
                 launched=launched,
-                executable=sections.get("EXECUTABLE", "").strip(),
-                bundle_id=sections.get("BUNDLE_ID", "").strip(),
-                new_processes=_lines(sections.get("NEW_PROCESSES", ""), 40),
-                process_events=_osquery_process_events(
-                    sections.get("OSQUERY_EVENTS", ""),
-                    sections.get("EXECUTABLE", "").strip(),
-                )
-                or _lines(sections.get("ES_PROCESS_EVENTS", ""), 120),
-                network_connections=_lines(sections.get("NETWORK", ""), 40),
-                network_events=(
-                    _osquery_network_events(sections.get("OSQUERY_EVENTS", ""))
-                    or _lines(sections.get("NETTOP_EVENTS", ""), 80)
-                ),
-                recent_files=_lines(sections.get("RECENT_FILES", ""), 60),
-                file_events=(
-                    _osquery_file_events(sections.get("OSQUERY_EVENTS", ""))
-                    or _lines(sections.get("FS_EVENTS", ""), 80)
+                executable=identified_executable,
+                bundle_id=identified_bundle_id,
+                behavior=build_behavior_summary(
+                    sections,
+                    executable=identified_executable,
+                    bundle_id=identified_bundle_id,
+                    duration=max(8, min(duration, 120)),
                 ),
                 logs=_lines(sections.get("LOGS", ""), 30),
                 collectors=_lines(sections.get("COLLECTORS", ""), 10),
@@ -320,81 +315,6 @@ def _lines(value: str, limit: int) -> list[str]:
     return list(dict.fromkeys(line.strip() for line in value.splitlines() if line.strip()))[:limit]
 
 
-def _osquery_rows(value: str, names: set[str]) -> list[dict[str, object]]:
-    rows = []
-    for line in value.splitlines():
-        try:
-            row = json.loads(line)
-        except (TypeError, ValueError):
-            continue
-        if isinstance(row, dict) and row.get("name") in names:
-            rows.append(row)
-    return rows
-
-
-def _osquery_process_events(value: str, executable: str) -> list[str]:
-    rows = _osquery_rows(value, {"es_process_events", "process_events"})
-    columns = [row.get("columns", {}) for row in rows]
-    columns = [item for item in columns if isinstance(item, dict)]
-    roots = {
-        str(item.get("pid", ""))
-        for item in columns
-        if executable and executable in str(item.get("path", ""))
-    }
-    included = set(roots)
-    changed = True
-    while changed:
-        changed = False
-        for item in columns:
-            pid = str(item.get("pid", ""))
-            if str(item.get("parent", "")) in included and pid not in included:
-                included.add(pid)
-                changed = True
-    selected = [item for item in columns if str(item.get("pid", "")) in included]
-    if not selected and executable:
-        selected = [item for item in columns if executable in str(item.get("cmdline", ""))]
-    result = []
-    for item in selected:
-        event = item.get("event_type") or item.get("mode") or "event"
-        result.append(
-            f"{item.get('time', '-')} {event} pid={item.get('pid', '-')} "
-            f"ppid={item.get('parent', '-')} {item.get('path', '')} "
-            f"{item.get('cmdline', '')}".strip()
-        )
-    return list(dict.fromkeys(result))[:120]
-
-
-def _osquery_network_events(value: str) -> list[str]:
-    rows = _osquery_rows(value, {"socket_events"})
-    result = []
-    for row in rows:
-        item = row.get("columns", {})
-        if not isinstance(item, dict):
-            continue
-        result.append(
-            f"{item.get('time', '-')} {item.get('action', 'socket')} "
-            f"pid={item.get('pid', '-')} {item.get('path', '')} "
-            f"{item.get('local_address', '')}:{item.get('local_port', '')} -> "
-            f"{item.get('remote_address', '')}:{item.get('remote_port', '')}"
-        )
-    return list(dict.fromkeys(result))[:120]
-
-
-def _osquery_file_events(value: str) -> list[str]:
-    rows = _osquery_rows(value, {"file_events", "es_file_events"})
-    result = []
-    for row in rows:
-        item = row.get("columns", {})
-        if not isinstance(item, dict):
-            continue
-        path = item.get("target_path") or item.get("filename") or ""
-        result.append(
-            f"{item.get('time', '-')} {item.get('action') or item.get('event_type') or 'file'} "
-            f"pid={item.get('pid', '-')} {path}"
-        )
-    return list(dict.fromkeys(result))[:120]
-
-
 def _process_output(process: subprocess.Popen[str] | None) -> str:
     if not process or process.poll() is None or not process.stdout:
         return ""
@@ -451,89 +371,86 @@ LOG_PID=$!
 OSQUERY_BIN=$(command -v osqueryi 2>/dev/null || true)
 OSQUERY_PID=""
 if [[ -n "$OSQUERY_BIN" ]]; then
-  cat > "$ROOT/osquery.conf" <<'JSON'
-{{"options":{{"disable_events":"false","events_expiry":"3600"}},"schedule":{{"es_process_events":{{"query":"select pid,parent,path,cmdline,time,event_type from es_process_events;","interval":1}},"process_events":{{"query":"select pid,parent,path,cmdline,time,mode,status from process_events;","interval":1}},"socket_events":{{"query":"select action,pid,path,local_address,remote_address,local_port,remote_port,time from socket_events;","interval":1}},"file_events":{{"query":"select target_path,category,action,time from file_events;","interval":1}},"es_file_events":{{"query":"select pid,parent,path,filename,dest_filename,event_type,time from es_process_file_events;","interval":1}}}},"file_paths":{{"canuinstall":["/tmp/canuinstall-dynamic/%%","/Users/admin/Library/%%"]}}}}
-JSON
-  OSQUERY_DAEMON=$(readlink "$OSQUERY_BIN" 2>/dev/null || print -r -- "$OSQUERY_BIN")
-  sudo -n "$OSQUERY_DAEMON" \
-    --config_path="$ROOT/osquery.conf" \
-    --database_path="$ROOT/osquery.db" \
-    --pidfile="$ROOT/osquery.pid" \
-    --logger_plugin=filesystem \
-    --logger_path="$ROOT" \
-    --disable_audit=false \
-    --audit_allow_config=true \
-    --audit_allow_process_events=true \
-    --audit_allow_sockets=true \
-    --audit_allow_fim_events=true \
-    --disable_endpointsecurity=false \
-    --disable_endpointsecurity_fim=false \
-    >/tmp/cui-osquery.txt 2>&1 &
+  (
+    while true; do
+      NOW=$(date +%s)
+      print "@$NOW" >> "$ROOT/osquery-processes.log"
+      "$OSQUERY_BIN" --config_path=/dev/null --disable_events=true --json \
+        "select pid,parent,name,path,cmdline,start_time from processes;" \
+        >> "$ROOT/osquery-processes.log" 2>> "$ROOT/osquery-errors.log"
+      print "@$NOW" >> "$ROOT/osquery-sockets.log"
+      "$OSQUERY_BIN" --config_path=/dev/null --disable_events=true --json \
+        "select pid,path,protocol,local_address,remote_address,local_port,remote_port,state from process_open_sockets where remote_port > 0;" \
+        >> "$ROOT/osquery-sockets.log" 2>> "$ROOT/osquery-errors.log"
+      sleep 1
+    done
+  ) &
   OSQUERY_PID=$!
-  print 'osquery: 进程状态、签名和事件表查询' > "$ROOT/collectors"
-  sleep 4
+  print 'osquery: 每秒记录进程和打开的网络 socket' > "$ROOT/collectors"
 else
-  print 'osquery: 未安装，使用系统采集器回退' > "$ROOT/collectors"
+  print 'osquery: 未安装，进程与 socket 快照缺失' > "$ROOT/collectors"
 fi
 
-sudo -n /usr/bin/eslogger --format json exec fork exit > "$ROOT/es-process.log" 2>&1 &
+sudo -n /usr/bin/eslogger --format json \
+  exec fork exit create copyfile link rename unlink truncate setmode setowner setflags \
+  > "$ROOT/es-events.log" 2> "$ROOT/eslogger-errors.log" &
 ES_PID=$!
-print 'eslogger: EndpointSecurity exec/fork/exit 事件' >> "$ROOT/collectors"
+print 'eslogger: EndpointSecurity 进程与文件变更事件' >> "$ROOT/collectors"
 
 sudo -n /usr/bin/fs_usage -w -f filesys > "$ROOT/fs-usage.log" 2>&1 &
 FS_PID=$!
-print 'fs_usage: 连续文件活动' >> "$ROOT/collectors"
+print 'fs_usage: 文件操作回退记录' >> "$ROOT/collectors"
 
+sudo -n /usr/sbin/tcpdump -l -tt -vv -n -i any \
+  '(tcp[tcpflags] & tcp-syn != 0) or udp' \
+  > "$ROOT/network-packets.log" 2> "$ROOT/tcpdump-errors.log" &
+PACKET_PID=$!
+print 'tcpdump: TCP 建连、UDP 与 DNS 数据包' >> "$ROOT/collectors"
+
+(
+  while true; do
+    print "@$(date +%s)" >> "$ROOT/lsof-sockets.log"
+    /usr/sbin/lsof -nP -i -FpcnPT >> "$ROOT/lsof-sockets.log" 2>/dev/null || true
+    sleep 0.5
+  done
+) &
+LSOF_PID=$!
+print 'lsof: 高频 socket 状态补充采样' >> "$ROOT/collectors"
+
+LAUNCH_TIME=$(date +%s)
 open -n "$LOCAL_APP" >/tmp/cui-open.txt 2>&1
 OPEN_STATUS=$?
-sleep 2
-PIDS=$(pgrep -x "$EXECUTABLE" 2>/dev/null | paste -sd, -)
-NETTOP_PID=""
-if [[ -n "$PIDS" ]]; then
-  /usr/bin/nettop -L 0 -n -P -p "${{PIDS%%,*}}" > "$ROOT/nettop.log" 2>&1 &
-  NETTOP_PID=$!
-  print 'nettop: 连续网络流量事件' >> "$ROOT/collectors"
-fi
 sleep {duration}
 
 PIDS=$(pgrep -x "$EXECUTABLE" 2>/dev/null | paste -sd, -)
-CHILDREN=""
-for PID in ${{(s:,:)PIDS}}; do
-  CHILDREN="$CHILDREN $(pgrep -P "$PID" 2>/dev/null | paste -sd, -)"
-done
-OBSERVED_PIDS=$(print -r -- "$PIDS,$CHILDREN" | tr ' ' ',' | tr -s ',' | sed 's/^,//;s/,$//')
-if [[ -n "$PIDS" ]]; then
-  lsof -nP -a -p "$OBSERVED_PIDS" -i 2>/dev/null > "$ROOT/network"
-  ps -p "$OBSERVED_PIDS" -o pid=,ppid=,user=,comm= 2>/dev/null > "$ROOT/processes"
-else
-  : > "$ROOT/network"
-  : > "$ROOT/processes"
-fi
 kill "$LOG_PID" >/dev/null 2>&1 || true
-kill "$NETTOP_PID" >/dev/null 2>&1 || true
 sudo -n kill "$FS_PID" >/dev/null 2>&1 || true
 sudo -n kill "$ES_PID" >/dev/null 2>&1 || true
-sudo -n kill "$OSQUERY_PID" >/dev/null 2>&1 || true
+sudo -n kill "$PACKET_PID" >/dev/null 2>&1 || true
+kill "$OSQUERY_PID" >/dev/null 2>&1 || true
+kill "$LSOF_PID" >/dev/null 2>&1 || true
 sleep 1
 
 print '===CANUINSTALL:LAUNCH_STATUS==='
-if [[ "$OPEN_STATUS" -eq 0 && -n "$PIDS" ]]; then print 'launched'; else print 'not-launched'; fi
+if [[ "$OPEN_STATUS" -eq 0 ]]; then print 'launched'; else print 'not-launched'; fi
 print '===CANUINSTALL:EXECUTABLE==='
 print -r -- "$EXECUTABLE"
 print '===CANUINSTALL:BUNDLE_ID==='
 print -r -- "$BUNDLE_ID"
-print '===CANUINSTALL:NEW_PROCESSES==='
-cat "$ROOT/processes" | head -40
-print '===CANUINSTALL:OSQUERY_EVENTS==='
-cat "$ROOT/osqueryd.results.log" 2>/dev/null | tail -2000
-print '===CANUINSTALL:ES_PROCESS_EVENTS==='
-grep -i "$EXECUTABLE" "$ROOT/es-process.log" 2>/dev/null | head -120
-print '===CANUINSTALL:NETWORK==='
-head -40 "$ROOT/network"
-print '===CANUINSTALL:NETTOP_EVENTS==='
-grep -E "$EXECUTABLE|bytes_in|bytes_out" "$ROOT/nettop.log" 2>/dev/null | head -80
+print '===CANUINSTALL:LAUNCH_TIME==='
+print -r -- "$LAUNCH_TIME"
+print '===CANUINSTALL:OSQUERY_PROCESSES==='
+cat "$ROOT/osquery-processes.log" 2>/dev/null | tail -6000
+print '===CANUINSTALL:OSQUERY_SOCKETS==='
+cat "$ROOT/osquery-sockets.log" 2>/dev/null | tail -4000
+print '===CANUINSTALL:ES_EVENTS==='
+cat "$ROOT/es-events.log" 2>/dev/null | tail -5000
+print '===CANUINSTALL:NETWORK_PACKETS==='
+cat "$ROOT/network-packets.log" 2>/dev/null | tail -4000
+print '===CANUINSTALL:LSOF_SOCKETS==='
+cat "$ROOT/lsof-sockets.log" 2>/dev/null | tail -6000
 print '===CANUINSTALL:FS_EVENTS==='
-grep -E "$EXECUTABLE|$LOCAL_APP|canuinstall-dynamic" "$ROOT/fs-usage.log" 2>/dev/null | head -80
+cat "$ROOT/fs-usage.log" 2>/dev/null | tail -5000
 print '===CANUINSTALL:RECENT_FILES==='
 for TARGET in \
   "$HOME/Library/Containers/$BUNDLE_ID" \
@@ -547,6 +464,8 @@ print '===CANUINSTALL:LOGS==='
 tail -40 "$ROOT/runtime.log"
 print '===CANUINSTALL:COLLECTORS==='
 cat "$ROOT/collectors"
+print '===CANUINSTALL:COLLECTOR_WARNINGS==='
+cat "$ROOT/osquery-errors.log" "$ROOT/eslogger-errors.log" "$ROOT/tcpdump-errors.log" 2>/dev/null | tail -80
 
 pkill -x "$EXECUTABLE" >/dev/null 2>&1 || true
 hdiutil detach "$MOUNT" -force >/dev/null 2>&1 || true

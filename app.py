@@ -55,8 +55,11 @@ TOOL_GROUPS = [
         "items": [
             ("tart", ["/opt/homebrew/bin/tart", "tart"], "创建一次性 macOS VM 并执行隔离动态观察"),
             ("tart-base-vm", [], "可克隆的 Tart 基础 VM；优先使用 canuinstall-runtime"),
-            ("osquery", [], "在 Tart VM 内查询进程状态、签名及可用事件表"),
-            ("eslogger", [], "在 Tart VM 内逐条记录 exec、fork 和 exit 进程事件"),
+            ("osquery", [], "在 Tart VM 内每秒记录进程和打开的网络 socket"),
+            ("eslogger", [], "在 Tart VM 内记录进程生命周期和文件变更事件"),
+            ("tcpdump", [], "在 Tart VM 内记录 TCP 建连、UDP 和 DNS 数据包"),
+            ("fs_usage", [], "在 Tart VM 内补充记录文件系统操作"),
+            ("lsof", [], "在 Tart VM 内高频补充采样进程网络 socket"),
         ],
     },
 ]
@@ -96,13 +99,24 @@ def environment_status() -> dict[str, object]:
         for tool_id, candidates, effect in group["items"]:
             if tool_id == "tart-base-vm":
                 path = str(tart["baseVm"]) if tart["baseVmAvailable"] else None
-            elif tool_id in {"osquery", "eslogger"}:
-                guest_path = (
-                    "/usr/local/bin/osqueryi"
-                    if tool_id == "osquery"
-                    else "/usr/bin/eslogger"
+            elif tool_id == "osquery":
+                path = (
+                    "Tart VM: /usr/local/bin/osqueryi"
+                    if tart["osqueryExpected"]
+                    else None
                 )
-                path = f"Tart VM: {guest_path}" if tart["osqueryExpected"] else None
+            elif tool_id in {"eslogger", "tcpdump", "fs_usage", "lsof"}:
+                guest_paths = {
+                    "eslogger": "/usr/bin/eslogger",
+                    "tcpdump": "/usr/sbin/tcpdump",
+                    "fs_usage": "/usr/bin/fs_usage",
+                    "lsof": "/usr/sbin/lsof",
+                }
+                path = (
+                    f"Tart VM: {guest_paths[tool_id]}"
+                    if tart["baseVmAvailable"]
+                    else None
+                )
             else:
                 path = resolve_tool(candidates)
             items.append(
